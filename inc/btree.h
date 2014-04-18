@@ -9,5 +9,7 @@ bool btree_contains(btree *, int);
 
 void btree_insert(btree *, int);
 
+void btree_insert_bulk(btree *, int *, int);
+
 #endif
 
