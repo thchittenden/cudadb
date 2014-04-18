@@ -5,7 +5,10 @@
 #include <stdio.h>
 
 #define WARP_INDEX() (threadIdx.x)
-#define BLOCK_INDEX() (blockDim.x * blockIdx.x + WARP_INDEX())
+#define BLOCK_INDEX() (blockIdx.x)
+#define BLOCK_SIZE() (blockDim.x)
+#define GRID_INDEX() (gridIdx.x)
+#define GRID_SIZE() (gridDim.x)
 
 #define HANDLE_ERROR(expr, handler) do { \
 		cudaError_t _call_res = expr; \

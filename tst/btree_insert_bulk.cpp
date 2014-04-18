@@ -4,10 +4,13 @@
 #include <assert.h>
 #include "CycleTimer.h"
 #include <set>
+#include "util.h"
 
-#define SIZE 10000
+#define SIZE 50000
 
 int main() {
+
+	setCudaHeapSize(SIZE*32);
 
 	int *N = new int[SIZE];
 	for(int i = 0; i < SIZE; i++) {
@@ -26,7 +29,10 @@ int main() {
 	printf("insert took %f ms\n", 1000.f*(post_insert - pre_insert));
 
 	for(int i = 0; i < SIZE; i++) {
-		assert(btree_contains(t, N[i]));
+		if(!btree_contains(t, N[i])) {
+			printf("tree does not contain %d\n", N[i]);
+			assert(false);
+		}
 	}
 
 	std::set<int> tree;	

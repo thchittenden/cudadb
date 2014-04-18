@@ -48,6 +48,8 @@ __device__ void* __broadcast_ptr(void* ptr, int src) {
 		p.words[0] = __shfl(p.words[0], src);
 		p.words[1] = __shfl(p.words[1], src);
 
+		return p.ptr;
+
 	#else
 		__shared__ void* tmp; //TODO can't declare SM here
 		if(WARP_INDEX() == src) 

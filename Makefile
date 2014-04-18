@@ -5,16 +5,16 @@ TSTDIR := tst
 EXECUTABLE := cudadb
 SRC_EXTS := cpp cu
 
-ADEBUG = false
-DEBUG = false
+ASSERTIONS = false
+DEBUG = true
 
 # C++ compiler
-CXX := g++ -m64
+CXX := g++
 CXXFLAGS := -O3 -Wall -I $(INCDIR)
 LDFLAGS := -L/usr/local/cuda/lib64/ -lcudart
 
 # NVCC compiler
-NVCC := nvcc -arch=sm_20 -m64
+NVCC := nvcc -arch=sm_20
 NVCCFLAGS := -O3 --restrict -lineinfo -I $(INCDIR)
 
 # add debug flag if necessary
@@ -23,7 +23,7 @@ ifeq ($(DEBUG),true)
 	CXXFLAGS := $(CXXFLAGS) -D__DEBUG__ -gstabs+
 endif
 
-ifeq ($(ADEBUG),true)
+ifeq ($(ASSERTIONS),true)
 	NVCCFLAGS := $(NVCCFLAGS) -D__ALWAYS_DEBUG__
 endif
 
