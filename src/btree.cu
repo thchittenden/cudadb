@@ -136,106 +136,59 @@ static __device__ void dev_btree_node_insert(btree_node *node, int x, btree_node
 	node->children[insert_idx + 1] = xp;
 }
 
-/**
- *	Traverses back up the tree inserting values and splitting nodes as necessary.
- *
- *	BLOCK SIZE: 32x1
- *	GRID SIZE:  1x1
- */
-static __device__ void dev_btree_insert_upsweep(btree *tree, 
-												int root,
-												btree_node *(*path)[BTREE_MAX_DEPTH], 
-												int path_level, 
-												int split, 
-												btree_node *rchild) {
-	
+static __device__ btree_node* dev_btree_node_split(btree *tree, int root, btree_node *parent, btree_node *left) {
+	ASSERT(tree != NULL);
+	ASSERT(left != NULL);
+
+	__shared__ int scratch_keys[BTREE_NODE_KEYS];
+	__shared__ btree_node* scratch_children[BTREE_NODE_CHILDREN];
+
 	int idx = WARP_INDEX();
-	
-	__shared__ int scratch_keys[BTREE_NODE_KEYS + 1];
-	__shared__ btree_node* scratch_children[BTREE_NODE_CHILDREN + 1];
+	int key = left->keys[idx];
+	ASSERT(__all(idx >= BTREE_NODE_KEYS || key != BTREE_KEY_NOT_PRESENT)); // assert full
 
-	btree_node* new_node;
-	btree_node* cur = (*path)[path_level];
-	while(true) {
+	// allocate new node
+	btree_node *right;
+	if(idx == 0) {
+		right = (btree_node*)malloc(sizeof(btree_node));
+		ASSERT(right != NULL);
+	}
+	right = (btree_node*)__broadcast_ptr(right, 0);
 
-		// get parent keys
-		int key = cur->keys[idx];
-
-		if(__all(idx >= BTREE_NODE_KEYS || key != BTREE_KEY_NOT_PRESENT)) {
-			// need to split node, allocate and distribute
-			if(idx == 0) {
-				new_node = (btree_node*)malloc(sizeof(btree_node));
-				ASSERT(new_node != NULL);
-			}
-			new_node = (btree_node*)__broadcast_ptr(new_node, 0);			
-			
-			// zero the node
-			new_node->keys[idx] = BTREE_KEY_NOT_PRESENT;
-			new_node->children[idx] = NULL;
+	// initialize shared memory
+	scratch_keys[idx] = key;
+	scratch_children[idx] = left->children[idx];
 		
-			// initialize shared node, scratch_keys contains all the keys + split,
-			// scratch_rchildren contains the corresponding right children for each key.
-			// we only include right children since the leftmost child never moves.
-			scratch_keys[idx] = key;
-			scratch_children[idx] = cur->children[idx];
-			
-			// insert split into scratch node
-			int insert_idx = __first_lane_true_idx(key == BTREE_KEY_NOT_PRESENT || key > split);
-			if(idx >= insert_idx && idx < BTREE_NODE_KEYS) {
-				scratch_keys[idx + 1] = scratch_keys[idx];
-				scratch_children[idx + 2] = scratch_children[idx + 1];
-			}
-			scratch_keys[insert_idx] = split;
-			scratch_children[insert_idx + 1] = rchild;
-			
-			// write scratch data out to new nodes
-#if BTREE_NODE_KEYS % 2 == 0
-			// even number of keys, no first child in SM
-			cur->keys[idx] = idx < BTREE_NODE_KEYS/2 ? scratch_keys[idx] : BTREE_KEY_NOT_PRESENT;
-			cur->children[idx + 1] = idx < BTREE_NODE_CHILDREN/2 ? scratch_rchildren[idx] : NULL;
-			
-			new_node->keys[idx] = idx < BTREE_NODE_KEYS/2 ? scratch_keys[idx + BTREE_NODE_KEYS/2 + 1] : BTREE_KEY_NOT_PRESENT;
-			new_node->children[idx] = idx < (BTREE_NODE_CHILDREN + 1)/2 ? scratch_rchildren[idx + BTREE_NODE_CHILDREN/2] : NULL;
+	// populate nodes TODO more effiently on left
+	left->keys[idx] = idx < BTREE_NODE_KEYS/2 ? scratch_keys[idx] : BTREE_KEY_NOT_PRESENT;
+	left->children[idx] = idx < BTREE_NODE_CHILDREN/2 ? scratch_children[idx] : NULL;
 
-			// update split and rchild
-			rchild = new_node;
-			split = scratch_keys[BTREE_NODE_KEYS/2];
-#else
-			// odd number of keys, first child in SM TODO bias
-			cur->keys[idx] = idx < BTREE_NODE_KEYS/2 ? scratch_keys[idx] : BTREE_KEY_NOT_PRESENT;
-			cur->children[idx] = idx < BTREE_NODE_CHILDREN/2 ? scratch_children[idx] : NULL;
+	right->keys[idx] = idx < BTREE_NODE_KEYS/2 ? scratch_keys[idx + BTREE_NODE_KEYS/2 + 1] : BTREE_KEY_NOT_PRESENT;
+	right->children[idx] = idx < BTREE_NODE_CHILDREN/2 ? scratch_children[idx + BTREE_NODE_CHILDREN/2] : NULL;
+	
+	int split = scratch_keys[BTREE_NODE_KEYS/2];
 
-			new_node->keys[idx] = idx < (BTREE_NODE_KEYS+1)/2 ? scratch_keys[idx + (BTREE_NODE_KEYS+1)/2] : BTREE_KEY_NOT_PRESENT;
-			new_node->children[idx] = idx < BTREE_NODE_CHILDREN/2 + 1 ? scratch_children[idx + BTREE_NODE_CHILDREN/2] : NULL;
-			
-			// update split and rchild
-			rchild = new_node;
-			split = scratch_keys[BTREE_NODE_KEYS/2];
-#endif
-
-			// check if we're at root and need a new node
-			if(path_level == 0) {
-				if(idx == 0) {
-					new_node = (btree_node*)malloc(sizeof(btree_node));	
-					ASSERT(new_node != NULL);
-					tree->roots[root] = new_node;
-				}
-				new_node = (btree_node*)__broadcast_ptr(new_node, 0);
-				new_node->keys[idx] = BTREE_KEY_NOT_PRESENT;
-				new_node->children[idx] = idx == 0 ? cur : NULL;
-				cur = new_node;
-			} else {
-				cur = (*path)[--path_level];
-			}
-
-		} else {
-			// node not full, insert into 
-			dev_btree_node_insert(cur, split, rchild);
-			break;
+	if(parent == NULL) {
+		// we were splitting root, make new root
+		btree_node* new_root;
+		if(idx == 0) {
+			new_root = (btree_node*)malloc(sizeof(btree_node));
+			ASSERT(new_root != NULL);
 		}
-
+		new_root = (btree_node*)__broadcast_ptr(new_root, 0);
+		
+		// initialize new root
+		new_root->keys[idx] = idx == 0 ? split : BTREE_KEY_NOT_PRESENT;
+		new_root->children[idx] = idx == 0 ? left : idx == 1 ? right : NULL;
+		
+		// set new root in tree
+		tree->roots[root] = new_root;
+	} else {
+		// insert right into parent, assume parent not full
+		dev_btree_node_insert(parent, split, right);
 	}
 
+	return right;
 }
 
 /**
@@ -248,16 +201,9 @@ static __device__ void dev_btree_insert(btree *tree, int root, int x) {
 	ASSERT(tree != NULL);
 	int idx = WARP_INDEX();
 
-	__shared__ btree_node* path[BTREE_MAX_DEPTH];
-	int path_level = 0;
-	if(idx == 0) {
-		path[0] = tree->roots[root];
-	}
-
-	__threadfence(); //ensure write to SM is seen
-
-	// find a leaf node
-	btree_node *cur = path[path_level];
+	// traverse down to leaf node splitting as we go
+	btree_node* parent = NULL;
+	btree_node* cur = tree->roots[root];
 	while(1) {
 		
 		int key = cur->keys[idx];
@@ -266,20 +212,30 @@ static __device__ void dev_btree_insert(btree *tree, int root, int x) {
 			// value already in tree
 			return; 
 		}
-		
+	
+		int node_idx = __first_lane_true_idx(key == BTREE_KEY_NOT_PRESENT || key > x);
+		if(__all(idx >= BTREE_NODE_KEYS || key != BTREE_KEY_NOT_PRESENT)) {
+			// node full, split it
+			btree_node* new_node = dev_btree_node_split(tree, root, parent, cur);
+			if(node_idx >= BTREE_NODE_CHILDREN/2) {
+				// need to go into right index
+				cur = new_node;
+				node_idx -= BTREE_NODE_CHILDREN/2;
+			}
+		}
+
 		// break if we've reached a leaf node
-		if(cur->children[0] == NULL) {
+		if(cur->children[0] == NULL) { // TODO we know height, only recurse n times
 			break;
 		} 
 		
 		// store node in path and advance, key[31] never present so we won't go out of bounds
-		int node_idx = __first_lane_true_idx(key == BTREE_KEY_NOT_PRESENT || key > x);
+		parent = cur;
 		cur = cur->children[node_idx];
-		path[++path_level] = cur;
 	}
 
-	// cur is now a leaf node, insert into it
-	dev_btree_insert_upsweep(tree, root, &path, path_level, x, NULL);
+	// cur now equals leaf, insert into it
+	dev_btree_node_insert(cur, x, NULL);
 }
 
 static __global__ void dev_btree_insert_single(btree *tree, int root, int x) {
