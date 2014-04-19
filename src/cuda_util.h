@@ -15,7 +15,7 @@ __device__ int __first_lane_true_idx(bool cond) {
  *	Returns true for the first lane in the warp where cond is true. False elswehere.
  */
 __device__ bool __first_lane_true(bool cond) {
-	return __first_lane_true_idx(cond) == WARP_INDEX();
+	return __first_lane_true_idx(cond) == LANE_INDEX();
 }
 
 __device__ int __broadcast(int var, int src) {
@@ -24,13 +24,13 @@ __device__ int __broadcast(int var, int src) {
 	return __shfl(var, src);
 #else
 	// use shared memory method
-	__shared__ int tmp;
-	if(WARP_INDEX() == src)
-		tmp = var;
+	__shared__ int tmp[32];
+	if(LANE_INDEX() == src)
+		tmp[WARP_INDEX()] = var;
 
-	__threadfence();
+	__threadfence_block();
 
-	return tmp;
+	return tmp[WARP_INDEX()];
 #endif
 }
 
@@ -51,13 +51,13 @@ __device__ void* __broadcast_ptr(void* ptr, int src) {
 		return p.ptr;
 
 	#else
-		__shared__ void* tmp; //TODO can't declare SM here
-		if(WARP_INDEX() == src) 
-			tmp = ptr;
+		__shared__ void* tmp[32];
+		if(LANE_INDEX() == src) 
+			tmp[WARP_INDEX()] = ptr;
 
-		__threadfence();
+		__threadfence_block();
 		
-		return tmp;
+		return tmp[WARP_INDEX()];
 
 	#endif
 }

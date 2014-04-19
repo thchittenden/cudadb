@@ -4,11 +4,16 @@
 #include <assert.h>
 #include <stdio.h>
 
-#define WARP_INDEX() (threadIdx.x)
-#define BLOCK_INDEX() (blockIdx.x)
+
+#define WARP_SIZE() 32
+#define LANE_INDEX() (threadIdx.x % WARP_SIZE())
+#define WARP_INDEX() (threadIdx.x / WARP_SIZE())
+
 #define BLOCK_SIZE() (blockDim.x)
-#define GRID_INDEX() (gridIdx.x)
+#define BLOCK_INDEX() (blockIdx.x)
+
 #define GRID_SIZE() (gridDim.x)
+#define GRID_INDEX() (gridIdx.x)
 
 #define HANDLE_ERROR(expr, handler) do { \
 		cudaError_t _call_res = expr; \
@@ -20,7 +25,7 @@
 
 #if defined(__DEBUG__) || defined(__ALWAYS_DEBUG__) 
 	#define ASSERT(x) assert(x)
-	#define DEBUG(lane, expr) if(WARP_INDEX() == lane) { expr; }
+	#define DEBUG(lane, expr) if(LANE_INDEX() == lane) { expr; }
 #else
 	#define ASSERT(x)
 	#define DEBUG(x, y)

@@ -6,13 +6,15 @@
 
 #define BTREE_KEY_NOT_PRESENT (1 << (sizeof(int)*8 - 1)) 
 
-#define BTREE_NUM_ROOTS 15
+#define BTREE_NUM_BLOCKS 15
+#define BTREE_NUM_WARPS  32
+#define BTREE_NUM_THREADS (BTREE_NUM_WARPS*WARP_SIZE())
+
+#define BTREE_NUM_ROOTS (BTREE_NUM_BLOCKS*BTREE_NUM_WARPS)
 
 #define BTREE_NODE_KEYS 31
 #define BTREE_NODE_CHILDREN (BTREE_NODE_KEYS + 1)
 
-// due to high branching factor (~16), never going to be taller than 8
-#define BTREE_MAX_DEPTH 8
 
 struct btree_node {
 	int keys[BTREE_NODE_KEYS + 1]; // add an extra key slot to make processing easier/align children
@@ -31,20 +33,20 @@ struct btree {
  */
 static __global__ void dev_btree_create(btree *tree) {
 	ASSERT(tree != NULL);
-
-	int idx = WARP_INDEX();
+	int idx = LANE_INDEX();
+	int aidx = BLOCK_INDEX() * BTREE_NUM_WARPS + LANE_INDEX(); 
 
 	// initialize all roots
 	btree_node* my_node;
-	if(idx < BTREE_NUM_ROOTS) {
+	if(idx < BTREE_NUM_WARPS) {
 		my_node = (btree_node *)malloc(sizeof(btree_node));
 		ASSERT(my_node != NULL);
-		tree->roots[idx] = my_node;
+		tree->roots[aidx] = my_node;
 	}
 
-	// zero all roots
+	// zero all roots in warp
 	btree_node* cur_node;
-	for(int i = 0; i < BTREE_NUM_ROOTS; i++) {
+	for(int i = 0; i < BTREE_NUM_WARPS; i++) {
 		cur_node = (btree_node*)__broadcast_ptr(my_node, i);
 		cur_node->keys[idx] = BTREE_KEY_NOT_PRESENT;
 		cur_node->children[idx] = NULL;
@@ -54,7 +56,7 @@ static __global__ void dev_btree_create(btree *tree) {
 btree *btree_create() {
 	btree* tree;
 	HANDLE_ERROR(cudaMalloc(&tree, sizeof(btree)), return NULL);
-	dev_btree_create<<<1, 32>>>(tree);
+	dev_btree_create<<<BTREE_NUM_BLOCKS, WARP_SIZE()>>>(tree);
 	return tree;
 }
 
@@ -68,10 +70,10 @@ static __global__ void dev_btree_contains(btree *tree, int x, bool *res) {
 	ASSERT(tree != NULL);
 	ASSERT(res != NULL);
 
-	int idx = WARP_INDEX();
-	int bidx = BLOCK_INDEX();
+	int idx = LANE_INDEX();
+	int root_idx = BLOCK_INDEX() * BTREE_NUM_WARPS + WARP_INDEX();
 
-	btree_node *cur = tree->roots[bidx];
+	btree_node *cur = tree->roots[root_idx];
 	ASSERT(cur != NULL);
 	while(cur != NULL) {
 		
@@ -98,7 +100,7 @@ bool btree_contains(btree *tree, int x) {
 	bool *res_d; // TODO reuse bools
 	HANDLE_ERROR(cudaMalloc(&res_d, sizeof(bool)), exit(1));
 	HANDLE_ERROR(cudaMemset(res_d, 0, sizeof(bool)), exit(1));
-	dev_btree_contains<<<BTREE_NUM_ROOTS, 32>>>(tree, x, res_d);
+	dev_btree_contains<<<BTREE_NUM_BLOCKS, BTREE_NUM_THREADS>>>(tree, x, res_d);
 	HANDLE_ERROR(cudaMemcpy(&res, res_d, sizeof(bool), cudaMemcpyDeviceToHost), exit(1));
 	HANDLE_ERROR(cudaFree(res_d), exit(1));
 	return res;
@@ -114,7 +116,7 @@ bool btree_contains(btree *tree, int x) {
 static __device__ void dev_btree_node_insert(btree_node *node, int x, btree_node *xp) {
 	ASSERT(node != NULL);
 
-	int idx = WARP_INDEX();
+	int idx = LANE_INDEX();
 
 	int key = node->keys[idx];
 	ASSERT(__any(idx < BTREE_NODE_KEYS && key == BTREE_KEY_NOT_PRESENT));
@@ -140,12 +142,19 @@ static __device__ btree_node* dev_btree_node_split(btree *tree, int root, btree_
 	ASSERT(tree != NULL);
 	ASSERT(left != NULL);
 
-	__shared__ int scratch_keys[BTREE_NODE_KEYS];
-	__shared__ btree_node* scratch_children[BTREE_NODE_CHILDREN];
+	// declare shared memory and get our warps chunk
+	__shared__ int scratch_keys_base[(BTREE_NODE_KEYS+1)*BTREE_NUM_WARPS];
+	__shared__ btree_node* scratch_children_base[BTREE_NODE_CHILDREN*BTREE_NUM_WARPS];
+	int* scratch_keys = &scratch_keys_base[(BTREE_NODE_KEYS+1)*WARP_INDEX()];
+	btree_node** scratch_children = &scratch_children_base[BTREE_NODE_CHILDREN*WARP_INDEX()];
 
-	int idx = WARP_INDEX();
+	int idx = LANE_INDEX();
 	int key = left->keys[idx];
 	ASSERT(__all(idx >= BTREE_NODE_KEYS || key != BTREE_KEY_NOT_PRESENT)); // assert full
+
+	// initialize shared memory
+	scratch_keys[idx] = key;
+	scratch_children[idx] = left->children[idx];
 
 	// allocate new node
 	btree_node *right;
@@ -155,10 +164,6 @@ static __device__ btree_node* dev_btree_node_split(btree *tree, int root, btree_
 	}
 	right = (btree_node*)__broadcast_ptr(right, 0);
 
-	// initialize shared memory
-	scratch_keys[idx] = key;
-	scratch_children[idx] = left->children[idx];
-		
 	// populate nodes TODO more effiently on left
 	left->keys[idx] = idx < BTREE_NODE_KEYS/2 ? scratch_keys[idx] : BTREE_KEY_NOT_PRESENT;
 	left->children[idx] = idx < BTREE_NODE_CHILDREN/2 ? scratch_children[idx] : NULL;
@@ -193,13 +198,10 @@ static __device__ btree_node* dev_btree_node_split(btree *tree, int root, btree_
 
 /**
  *	Inserts a single element into the tree.
- *
- * 	BLOCK_SIZE: 32x1
- *  GRID_SIZE:  1x1
  */
 static __device__ void dev_btree_insert(btree *tree, int root, int x) {
 	ASSERT(tree != NULL);
-	int idx = WARP_INDEX();
+	int idx = LANE_INDEX();
 
 	// traverse down to leaf node splitting as we go
 	btree_node* parent = NULL;
@@ -251,8 +253,9 @@ void btree_insert(btree *tree, int x) {
 }
 
 static __global__ void dev_btree_insert_bulk(btree *tree, int *xs, int n) {
-	for(int i = BLOCK_INDEX(); i < n; i += GRID_SIZE()) {
-		dev_btree_insert(tree, BLOCK_INDEX(), xs[i]);
+	int root_idx = BLOCK_INDEX() * BTREE_NUM_WARPS + WARP_INDEX();
+	for(int i = root_idx; i < n; i += BTREE_NUM_ROOTS) {
+		dev_btree_insert(tree, root_idx, xs[i]);
 	}
 }
 
@@ -261,7 +264,7 @@ void btree_insert_bulk(btree *tree, int *xs, int n) {
 	int *xs_d;
 	HANDLE_ERROR(cudaMalloc(&xs_d, sizeof(int) * n), exit(1));
 	HANDLE_ERROR(cudaMemcpy(xs_d, xs, sizeof(int) * n, cudaMemcpyHostToDevice), exit(1));
-	dev_btree_insert_bulk<<<BTREE_NUM_ROOTS, 32>>>(tree, xs_d, n);
+	dev_btree_insert_bulk<<<BTREE_NUM_BLOCKS,BTREE_NUM_THREADS>>>(tree, xs_d, n);
 	HANDLE_ERROR(cudaFree(xs_d), exit(1));
 	return;
 }

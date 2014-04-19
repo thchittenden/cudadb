@@ -6,7 +6,7 @@ EXECUTABLE := cudadb
 SRC_EXTS := cpp cu
 
 ASSERTIONS = false
-DEBUG = false
+DEBUG = true
 
 # C++ compiler
 CXX := g++
