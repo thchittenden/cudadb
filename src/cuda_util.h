@@ -18,6 +18,10 @@ __device__ bool __first_lane_true(bool cond) {
 	return __first_lane_true_idx(cond) == LANE_INDEX();
 }
 
+__device__ bool __lanes_active() {
+	return __popc(__ballot(true));
+}
+
 __device__ int __broadcast(int var, int src) {
 #if __CUDA_ARCH__ >= 300
 	// use shfl intrinsic

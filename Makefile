@@ -10,21 +10,21 @@ DEBUG = true
 
 # C++ compiler
 CXX := g++
-CXXFLAGS := -O3 -Wall -I $(INCDIR)
+CXXFLAGS := -std=c++11 -Wall -I $(INCDIR) -I /usr/local/cuda/include
 LDFLAGS := -L/usr/local/cuda/lib64/ -lcudart
 
 # NVCC compiler
 NVCC := nvcc -arch=sm_20
-NVCCFLAGS := -O3 --restrict -lineinfo -I $(INCDIR)
+NVCCFLAGS := --restrict -lineinfo -I $(INCDIR)
 
 # add debug flag if necessary
 ifeq ($(DEBUG),true)
 	NVCCFLAGS := $(NVCCFLAGS) -D__DEBUG__ -g -G
-	CXXFLAGS := $(CXXFLAGS) -D__DEBUG__ -gstabs+
+	CXXFLAGS := $(CXXFLAGS) -D__DEBUG__ -g3 -gstabs+
 endif
 
 ifeq ($(ASSERTIONS),true)
-	NVCCFLAGS := $(NVCCFLAGS) -D__ALWAYS_DEBUG__
+	NVCCFLAGS := $(NVCCFLAGS) -D__ASSERTS__
 endif
 
 # find all source files

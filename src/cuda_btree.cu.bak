@@ -1,4 +1,4 @@
-#include "btree.h"
+#include "cuda_btree.cuh"
 #include "cuda_common.h"
 #include "cuda_util.h"
 
@@ -7,7 +7,7 @@
 #define BTREE_KEY_NOT_PRESENT (1 << (sizeof(int)*8 - 1)) 
 
 #define BTREE_NUM_BLOCKS 15
-#define BTREE_NUM_WARPS  32
+#define BTREE_NUM_WARPS  15
 #define BTREE_NUM_THREADS (BTREE_NUM_WARPS*WARP_SIZE())
 
 #define BTREE_NUM_ROOTS (BTREE_NUM_BLOCKS*BTREE_NUM_WARPS)
@@ -27,9 +27,6 @@ struct btree {
 
 /**
  *	Initializes a new btree.
- *
- *	BLOCK SIZE: 32x1
- *	GRID SIZE:  1x1
  */
 static __global__ void dev_btree_create(btree *tree) {
 	ASSERT(tree != NULL);
