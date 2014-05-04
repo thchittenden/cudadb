@@ -14,6 +14,6 @@ struct record {
 #endif
 
 TABLE(record);
-CRITERIA(record, 2);
+CRITERIA(record, 1);
 
 #endif

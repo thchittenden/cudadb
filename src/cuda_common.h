@@ -14,11 +14,9 @@
 #define GRID_SIZE() (gridDim.x)
 #define GRID_INDEX() (gridIdx.x)
 
-#if defined(__DEBUG__) || defined(__ASSERTS__) 
-	#define ASSERT(x) assert(x)
+#if defined(__DEBUG__) && defined(__ASSERTS__) 
 	#define DEBUG(lane, expr) if(LANE_INDEX() == lane) { expr; }
 #else
-	#define ASSERT(x)
 	#define DEBUG(x, y)
 #endif
 

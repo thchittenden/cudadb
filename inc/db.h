@@ -26,22 +26,35 @@ table<T> *db_table_create(A T::*... idxs) {
 	// create table and indices
 	table<T> *t = new table<T>;
 	ASSERT(t != NULL);
+
+	// create stream
+	cudaStreamCreate(&t->table_stream);
+
+	// create offset map
 	for(int i = 0; i < sizeof...(A); i++) {
 		DEBUGP("table %p idx %d offset/size: %lu/%lu\n", t, i, offsets[i], sizes[i]);
-		table_index<T>* idx = db_index_create<T>(offsets[i], sizes[i]);
-		t->offset_to_index.insert(std::make_pair(offsets[i], idx));
+		table_index_info x;
+		x.idx = i;
+		x.key_offset = offsets[i];
+		x.key_size = sizes[i];
+		t->offset_to_index_info.insert(std::make_pair(offsets[i], x));
 	}
+
+	// create indexes
+	int res = db_indexes_create(t, (size_t *)&offsets, (size_t *)&sizes);
+	if(res < 0) {
+		delete t;
+		return NULL;
+	}
+
 	return t;
 }
 
 template <typename T>
 void db_table_destroy(table<T> *t) {
 	ASSERT(t != NULL);
-	auto idx_it = t->offset_to_index.begin();
-	while(idx_it != t->offset_to_index.end()) {
-		db_index_destroy<T>(std::get<1>(*idx_it));
-		idx_it++;
-	}
+	db_indexes_destroy<T>(t);
+	cudaStreamDestroy(t->table_stream);
 	delete t;
 }
 

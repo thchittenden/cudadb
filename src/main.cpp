@@ -1,5 +1,6 @@
 #include "db.h"
 #include "db_exp.h"
+#include "db_insert.h"
 #include "db_select.h"
 
 #include <iostream>
@@ -10,13 +11,19 @@ int main() {
 	auto t = db_table_create(&record::id, &record::time); 
 	cout << "got table: " << t << endl;
 
-	select_handle<record, 2>* h = db_select_prepare(t, make_pair(&record::id, 10), make_pair(&record::time, (long)100));
-	cout << "got handle: " << h << endl;
+	record* recs = new record[1000];
+	for(int i = 0; i < 1000; i++) {
+		recs[i].id = 10;
+		recs[i].time = 1000+i;
+	}
+	db_insert_bulk(t, recs, 1000);
 
+	auto h = db_select_prepare(t, make_pair(&record::id, 10)); 
 	record* rec;
 	while((rec = db_select_next(h)) != NULL) {
-		cout << "got rec: " << rec << endl;
+		cout << "got record{id=" << rec->id << ", time=" << rec->time << "}" << endl;
 	}
+	
 	db_select_destroy(h);
 	db_table_destroy(t);
 }

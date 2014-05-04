@@ -5,17 +5,17 @@ TSTDIR := tst
 EXECUTABLE := cudadb
 SRC_EXTS := cpp cu
 
-ASSERTIONS = false
+ASSERTIONS = true
 DEBUG = true
 
 # C++ compiler
 CXX := g++
-CXXFLAGS := -std=c++11 -Wall -I $(INCDIR) -I /usr/local/cuda/include
+CXXFLAGS := -std=c++11 -Wall -I $(INCDIR) -I /usr/local/cuda/include -O3
 LDFLAGS := -L/usr/local/cuda/lib64/ -lcudart
 
 # NVCC compiler
 NVCC := nvcc -arch=sm_20
-NVCCFLAGS := --restrict -lineinfo -I $(INCDIR)
+NVCCFLAGS := --restrict -lineinfo -I $(INCDIR) -O3
 
 # add debug flag if necessary
 ifeq ($(DEBUG),true)
@@ -41,6 +41,9 @@ TSTS_EXEC := $(basename $(TSTS))
 
 default: $(EXECUTABLE)
 
+# get dependencies for each obj
+-include $(OBJS:.o=.d)
+
 clean:
 		rm -rf $(OBJDIR) $(EXECUTABLE) $(TSTS_EXEC)
 
@@ -50,10 +53,12 @@ $(EXECUTABLE): $(OBJS)
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 		@test -d $(dir $@) || mkdir -p $(dir $@)
 		$(CXX) $< $(CXXFLAGS) -c -o $@
+		$(CXX) -MM $(CXXFLAGS) $< > $(OBJDIR)/$*.d
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.cu
 		@test -d $(dir $@) || mkdir -p $(dir $@)
 		$(NVCC) $< $(NVCCFLAGS) -c -o $@
+		$(NVCC) -M $(NVCCFLAGS) $< > $(OBJDIR)/$*.d
 
 $(TSTDIR)/%: $(TSTDIR)/%.cpp $(OBJS)
 		$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $(OBJS) $<

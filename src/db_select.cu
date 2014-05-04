@@ -1,39 +1,41 @@
+#include "common.h"
 #include "db_types.h"
 #include "db_defs.h"
 
-enum ORD {
-	LT,
-	EQ,
-	GT
-};
+#include "cuda_util.h"
 
-template <typename T>
-static __device__ ORD evaluate_criteria(T* _x1, T* _x2, size_t offset, size_t size) {
-	char *x1 = (char*)_x1, *x2 = (char*)_x2;
-	for(int i = offset; i < offset + size; i++) {
-		if (x1[i] < x2[i]) return LT;
-		if (x1[i] > x2[i]) return GT;
+/**
+ *	Evaluates a set of criteria on an element and returns true if it passes. False otherwise.
+ */
+template <typename T, int N>
+static __device__ bool evaluate_criteria(table_index<T>* idxs, criteria<T, N>* crit, T* elem) {
+	for(int i = 0; i < N; i++) {
+		table_index<T>* idx = &idxs[crit->crit_idxs[i]];
+		if(memcmp(&crit->model, elem, idx->key_offset, idx->key_size) != EQ) {
+			return false;
+		}
 	}
-	return EQ;
+	return true;
 }
 
 template <typename T, int N>
-static __global__ void cuda_select_block(criteria<T, N>* sel_crit, select_state<T>* state, result_buffer<T>* res) {
-
+static __global__ void dev_select_block(table_index<T>* idxs, criteria<T, N>* _crit, select_state<T>* state, result_buffer<T>* res) {
 	int idx = LANE_INDEX();
 
 	// load criteria into shared memory and pick an arbitrary tree
-	__shared__ criteria<T, N> crit = *sel_crit;
-	__shared__ btree<T*>* tree = &crit.
+	__shared__ criteria<T, N> crit;
+	__shared__ table_index<T>* index;
+	crit = *_crit;
+	index = &idxs[crit.crit_idxs[0]];
 
 	// load state
 	__shared__ btree_node<T*>* node_stack[BTREE_MAX_DEPTH];
 	__shared__ int node_idx[BTREE_MAX_DEPTH];
-	int root_idx = state.root_idx;
-	int stack_idx = state.stack_idx;
+	int stack_idx = state->stack_idx;
 	if(state->node_stack[0] == NULL) {
 		// new select, initialize state
-		node_stack[0] = tree->roots[0];
+		node_stack[0] = index->tree.root;
+		node_idx[0] = 0;
 	} else {
 		// old select, load in node_stack from state
 		if(idx < BTREE_MAX_DEPTH) {
@@ -41,18 +43,98 @@ static __global__ void cuda_select_block(criteria<T, N>* sel_crit, select_state<
 			node_idx[idx] = state->node_idx[idx];
 		}
 	}
+	DEBUG(0, printf("searching index %p node %p at index %d\n", index, node_stack[stack_idx], node_idx[stack_idx])); 
 
 	// fill result buffer
-	int res_fill = 0;
-	while(res_fill < SELECT_CHUNK_SIZE) {
+	__shared__ int res_fill;
+	res_fill = 0;
+	while(res_fill < SELECT_CHUNK_SIZE && stack_idx >= 0) {
+		
+		if(node_idx[stack_idx] == BTREE_NODE_KEYS) {
+			// we've finished this level, recurse up
+			stack_idx--;
+			continue;
+		}
+		
+		// get current node
 		btree_node<T*>* cur_node = node_stack[stack_idx];
-		T* elem = cur_node->elem[idx];
-		ORD res = evaluate_criteria
+		
+		// fetch node contents
+		T* elem = cur_node->elems[idx];
+		btree_node<T*>* child_node = cur_node->children[idx];
+		
+		bool is_leaf = __broadcast(child_node == NULL, 0); //TODO could know tree height
+		if(is_leaf) {
+			// at leaf node, add as many as possible
+			int max_elems = SELECT_CHUNK_SIZE - res_fill;
+			int min_idx   = node_idx[stack_idx];
+			bool is_valid = idx >= min_idx && evaluate_criteria(idxs, &crit, elem);
+			int num_valid = __warp_vote(is_valid);
+			int my_idx    = __warp_exc_sum(is_valid);
+
+			if(is_valid && my_idx < max_elems) {
+				res->results[res_fill + my_idx] = *elem;
+			}
+			res_fill += min(num_valid, max_elems);
+
+			if(max_elems < num_valid) {
+				// more on this level, store node_idx 
+				if(is_valid && my_idx == max_elems - 1) {
+					ASSERT(idx < WARP_SIZE() - 1);
+					node_idx[stack_idx] = idx + 1;
+				}
+			} else {
+				// finished this node //TODO break early?
+				stack_idx--;
+			}
+
+		} else {
+
+			// not a leaf node, 
+			int num_elems = __warp_vote(elem != NULL);
+			int num_children = num_elems + 1;
+			ASSERT(idx >= num_elems || elem != NULL);
+
+			// compare all elements
+			order ord = memcmp(elem, &crit.model, index->key_offset, index->key_size);
+			
+			// find first non-LT node
+			int child_idx, init_idx = node_idx[stack_idx];
+			if(init_idx == 0) {
+				// first recurse
+				child_idx = __first_lane_true_idx(ord != LT);
+			} else {
+				child_idx = init_idx;
+				if(child_idx > num_children - 1) {
+					// we've finished this node, go back up
+					stack_idx--;
+					continue;
+				}
+				if(__any(idx == child_idx - 1 && ord != EQ)) {
+					// we stop recursing when the element before the child_idx
+					// is not equal
+					break;
+				}
+			}
+		
+			// check if node before was valid and if so, add it
+			if(idx == child_idx - 1 && ord == EQ && evaluate_criteria(idxs, &crit, elem)) {
+				res->results[res_fill] = *elem;
+				res_fill++;
+			}
+
+			// now recurse into child node
+			node_idx[stack_idx] = child_idx + 1;
+			stack_idx++;
+			node_idx[stack_idx] = 0;
+			node_stack[stack_idx] = cur_node->children[child_idx];
+		}
+
 	}
 	res->nvalid = res_fill;
+	DEBUG(0, printf("found %d elements\n", res_fill));
 
 	// store state
-	state->root_idx = root_idx;
 	state->stack_idx = stack_idx;
 	if(idx < BTREE_MAX_DEPTH) {
 		state->node_stack[idx] = node_stack[idx];
@@ -61,15 +143,15 @@ static __global__ void cuda_select_block(criteria<T, N>* sel_crit, select_state<
 }
 
 template <typename T, int N>
-void db_select_block(criteria<T, N>* crit, select_state<T>* state, result_buffer<T>* res) {
+void db_dev_select_block(table<T>* t, criteria<T, N>* crit, select_state<T>* state, result_buffer<T>* res) {
 
-	cuda_select_block<T, N><<<1, 32>>>(crit, state, res);
+	dev_select_block<T, N><<<1, 32, 0, t->table_stream>>>(t->dev_indexes, crit, state, res);
 
 }
 
 // explicit instantiation until nvcc supports variadic templates
 #define CRITERIA(T, N) \
-	template void db_select_block<T, N>(criteria<T, N>*, select_state<T>*, result_buffer<T>*);
+	template void db_dev_select_block<T, N>(table<T>*, criteria<T, N>*, select_state<T>*, result_buffer<T>*);
 #include "db_exp.h"
 #undef CRITERIA
 

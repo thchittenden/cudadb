@@ -1,3 +1,4 @@
+#include "common.h"
 #include "db_types.h"
 #include "db_index.h"
 #include "db_defs.h"
@@ -11,29 +12,25 @@
  *	BLOCK SIZE: 32x1
  *	GRID  SIZE: 1x1
  */
-template <typename PT>
-static __global__ void dev_btree_create(btree<PT>* tree, size_t key_offset, size_t key_size) {
-	ASSERT(tree != NULL);
-	int idx = LANE_INDEX();
+template <typename T>
+static __global__ void dev_indexes_create(int n, table_index<T>* ti) {
+	ASSERT(ti != NULL);
+	int idx  = LANE_INDEX();
 
-	// initialize key info
-	tree->key_offset = key_offset;
-	tree->key_size = key_size;
-
-	// initialize all roots
-	btree_node<PT>* my_node;
-	if(idx < BTREE_NUM_ROOTS) {
-		my_node = (btree_node<PT> *)malloc(sizeof(btree_node<PT>));
-		ASSERT(my_node != NULL);
-		tree->roots[idx] = my_node;
+	// initialize root
+	btree_node<T*>* my_root;
+	if(idx < n) {
+		my_root = (btree_node<T*>*)malloc(sizeof(*my_root));
+		ASSERT(my_root != NULL);
+		ti[idx].tree.root = my_root;
 	}
 
-	// zero all roots in warp
-	btree_node<PT>* cur_node;
-	for(int i = 0; i < BTREE_NUM_ROOTS; i++) {
-		cur_node = (btree_node<PT>*)__broadcast_ptr(my_node, i);
-		cur_node->elems[idx] = NULL;
-		cur_node->children[idx] = NULL;
+	// zero each root
+	btree_node<T*>* cur_root;
+	for(int i = 0; i < n; i++) {
+		cur_root = (btree_node<T*>*)__broadcast_ptr(my_root, i);
+		cur_root->elems[idx] = NULL;
+		cur_root->children[idx] = NULL;
 	}
 }
 
@@ -41,15 +38,49 @@ static __global__ void dev_btree_create(btree<PT>* tree, size_t key_offset, size
  *	Creates an index which will reference the data.
  */
 template <typename T>
-table_index<T>* db_index_create(size_t key_offset, size_t key_size) {
-	table_index<T>* t = new table_index<T>;
+int db_indexes_create(table<T>* t, size_t* key_offsets, size_t* key_sizes) {
 	
-	// allocate and initialize btree
-	cudaMalloc(&t->dev_btree, sizeof(btree<T*>));
-	dev_btree_create<T*><<<1, 32>>>(t->dev_btree, key_offset, key_size);
+	// get number of indexes
+	int n = t->offset_to_index_info.size();
 
-	// return index
-	return t;
+	// allocate table indexes
+	table_index<T>* dev_indexes;
+	HANDLE_ERROR(cudaMalloc(&dev_indexes, n*sizeof(*dev_indexes)), goto err0);
+	
+	// copy key_offsets and key_sizes to device
+	HANDLE_ERROR(cudaMemcpy2DAsync(
+		&dev_indexes[0].key_offset, // destination
+		sizeof(table_index<T>), 	// destination pitch
+		key_offsets,				// source
+		sizeof(size_t),				// source pitch
+		1*sizeof(size_t), 			// width in bytes
+		n,							// height
+		cudaMemcpyHostToDevice,		// kind
+		t->table_stream				// stream
+	), goto err1);
+	HANDLE_ERROR(cudaMemcpy2DAsync(
+		&dev_indexes[0].key_size,	// destination
+		sizeof(table_index<T>),		// destination pitch
+		key_sizes,					// source
+		sizeof(size_t),				// source pitch
+		1*sizeof(size_t), 			// width in bytes
+		n,							// height 
+		cudaMemcpyHostToDevice,		// kind
+		t->table_stream				// stream
+	), goto err1);
+
+	// initialize table indexes
+	dev_indexes_create<<<1, 32, 0, t->table_stream>>>(n, dev_indexes);
+	
+	// return success
+	t->dev_indexes = dev_indexes;
+	return 0;
+
+err1:
+	cudaFree(dev_indexes);
+err0:
+	t->dev_indexes = NULL;
+	return -1;
 }
 
 /**
@@ -58,16 +89,16 @@ table_index<T>* db_index_create(size_t key_offset, size_t key_size) {
  *	BLOCK SIZE: 32x1
  *  GRID  SIZE: 15x1
  */
-template <typename PT>
-static __global__ void dev_btree_destroy(btree<PT> *tree) {
+template <typename T>
+static __global__ void dev_index_destroy(table_index<T>* ti) {
 	int idx = LANE_INDEX();
 	int bidx = BLOCK_INDEX();
 
-	__shared__ btree_node<PT>* node_stack[BTREE_MAX_DEPTH];
+	__shared__ btree_node<T*>* node_stack[BTREE_MAX_DEPTH];
 	__shared__ int node_idx[BTREE_MAX_DEPTH];
 	int stack_idx = 0;
 
-	node_stack[0] = tree->roots[bidx];
+	node_stack[0] = ti[bidx].tree.root;
 	node_idx[0]   = 0;
 	while(stack_idx >= 0) {
 		ASSERT(stack_idx < BTREE_MAX_DEPTH);
@@ -75,10 +106,11 @@ static __global__ void dev_btree_destroy(btree<PT> *tree) {
 
 		if(node_idx[stack_idx] < BTREE_NODE_CHILDREN &&
 			node_stack[stack_idx]->children[node_idx[stack_idx]] != NULL) {
+			
 			// more children, free them
 			node_idx[stack_idx] += 1;
 			node_idx[stack_idx + 1] = 0;
-			node_stack[stack_idx + 1] = node_stack[stack_idx]->children[node_idx[stack_idx]];
+			node_stack[stack_idx + 1] = node_stack[stack_idx]->children[node_idx[stack_idx] - 1];
 			stack_idx += 1;
 		} else {
 			// last child, free node
@@ -93,17 +125,22 @@ static __global__ void dev_btree_destroy(btree<PT> *tree) {
  * 	Destroys an index.
  */
 template <typename T>
-void db_index_destroy(table_index<T> *t) {
-	dev_btree_destroy<T*><<<15, 32>>>(t->dev_btree);
-	cudaFree(t->dev_btree);
-	delete t;
+void db_indexes_destroy(table<T>* t) {
+	// get number of indexes
+	int n = t->offset_to_index_info.size();
+
+	// launch destroy kernel
+	dev_index_destroy<<<n, 32, 0, t->table_stream>>>(t->dev_indexes);
+
+	// free indexes
+	cudaFree(t->dev_indexes);
 }
 
 // explicit instantiations since nvcc doesn't support C++11
 #define TABLE(T) \
-	template __global__ void dev_btree_create<T*>(btree<T*>*, size_t, size_t); \
-	template table_index<T>* db_index_create<T>(size_t, size_t); \
-	template __global__ void dev_btree_destroy<T*>(btree<T*>*); \
-	template void db_index_destroy<T>(table_index<T>*);
+	template __global__ void dev_indexes_create<T>(int n, table_index<T>*); \
+	template int db_indexes_create<T>(table<T>*, size_t*, size_t*); \
+	template __global__ void dev_index_destroy<T>(table_index<T>*); \
+	template void db_indexes_destroy<T>(table<T>*);
 #include "db_exp.h"
 #undef TABLE

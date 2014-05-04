@@ -4,12 +4,16 @@
 #include <assert.h>
 #include <stdio.h>
 
-#if defined(__DEBUG__) || defined(__ASSERTS__)
-#define ASSERT(x) assert(x)
-#define DEBUGP(str, ...) printf(str, ## __VA_ARGS__)
+#if defined(__ASSERTS__)
+	#define ASSERT(x) assert(x)
 #else
-#define ASSERT(x)
-#define DEBUGP(...)
+	#define ASSERT(x)
+#endif
+
+#if defined(__DEBUG__)
+	#define DEBUGP(str, ...) printf(str, ## __VA_ARGS__)
+#else
+	#define DEBUGP(...)
 #endif
 
 #define HANDLE_ERROR(expr, handler) do { \

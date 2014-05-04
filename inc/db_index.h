@@ -7,12 +7,12 @@
  *	Creates a regular index which will reference the relevent data. 
  */
 template <typename T>
-table_index<T>* db_index_create(size_t member_offset, size_t member_size);
+int db_indexes_create(table<T>*, size_t* key_offsets, size_t* key_sizes);
 
 /**
  * 	Destroys a primary index.
  */
 template <typename T>
-void db_index_destroy(table_index<T> *t);
+void db_indexes_destroy(table<T>*);
 
 #endif
