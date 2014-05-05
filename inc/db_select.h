@@ -15,19 +15,21 @@ void db_dev_select_block(table<T>*, criteria<T, N>*, select_state<T>*, result_bu
  *	returned handle can be used to retrieve the selected results.
  */
 template <typename T, typename... A>
-select_handle<T, sizeof...(A)> *db_select_prepare(table<T>* t, std::pair<A T::*, A>... params) {
+select_handle<T, sizeof...(A)> *db_select_prepare(table<T>* t, std::tuple<A T::*, cmp_op, A>... params) {
 	ASSERT(t != NULL);
+	cmp_op cmp_ops[] = {std::get<1>(params)...};
 	size_t offsets[] = {offset_member(std::get<0>(params))...};
 
 	// generate criteria
 	criteria<T, sizeof...(A)> crit;
-	APPLY(crit.model.*std::get<0>(params) = std::get<1>(params));
+	APPLY(crit.model.*std::get<0>(params) = std::get<2>(params));
 	for(int i = 0; i < sizeof...(A); i++) {
 		auto idx_it = t->offset_to_index_info.find(offsets[i]);
 		if(idx_it == t->offset_to_index_info.end()) {
 			DEBUGP("could not find index in table %p for offset %lu...\n", t, offsets[i]);
 			return NULL;
 		}
+		crit.crit_ops[i] = cmp_ops[i];
 		crit.crit_idxs[i] = std::get<1>(*idx_it).idx; 
 	}
 
@@ -49,7 +51,11 @@ select_handle<T, sizeof...(A)> *db_select_prepare(table<T>* t, std::pair<A T::*,
 	handle->dev_crit  = (criteria<T, sizeof...(A)>*)dev_buf;
 	handle->dev_state = (select_state<T>*)(dev_buf + sizeof(*handle->dev_crit));
 	handle->dev_buf   = (result_buffer<T>*)(dev_buf + sizeof(*handle->dev_crit) + sizeof(*handle->dev_state));
-	HANDLE_ERROR(cudaMemcpyAsync(handle->dev_crit, &crit, sizeof(*handle->dev_crit), cudaMemcpyHostToDevice, t->table_stream), goto err2);
+	HANDLE_ERROR(cudaMemcpyAsync(handle->dev_crit, 	// destination
+				&crit, 								// source
+				sizeof(*handle->dev_crit), 			// size
+				cudaMemcpyHostToDevice, 			// direction
+				t->table_stream), goto err2);		// stream
 	HANDLE_ERROR(cudaMemsetAsync(handle->dev_state, 0, sizeof(*handle->dev_state), t->table_stream), goto err2);
 
 	// allocate host buffers
@@ -64,11 +70,19 @@ select_handle<T, sizeof...(A)> *db_select_prepare(table<T>* t, std::pair<A T::*,
 
 	// start first two select blocks
 	db_dev_select_block(t, handle->dev_crit, handle->dev_state, handle->dev_buf);
-	HANDLE_ERROR(cudaMemcpyAsync(handle->host_buf_cur, handle->dev_buf, sizeof(*handle->host_buf_cur), cudaMemcpyDeviceToHost, t->table_stream), goto err2);
+	HANDLE_ERROR(cudaMemcpyAsync(handle->host_buf_cur,	// destination
+				handle->dev_buf, 						// source
+				sizeof(*handle->host_buf_cur), 			// size
+				cudaMemcpyDeviceToHost, 				// direction
+				t->table_stream), goto err2);			// stream
 	HANDLE_ERROR(cudaEventRecord(handle->event_cur, t->table_stream), goto err2);
 
 	db_dev_select_block(t, handle->dev_crit, handle->dev_state, handle->dev_buf);
-	HANDLE_ERROR(cudaMemcpyAsync(handle->host_buf_next, handle->dev_buf, sizeof(*handle->host_buf_next), cudaMemcpyDeviceToHost, t->table_stream), goto err2);
+	HANDLE_ERROR(cudaMemcpyAsync(handle->host_buf_next,	// destination
+				handle->dev_buf, 						// source
+				sizeof(*handle->host_buf_next), 		// size
+				cudaMemcpyDeviceToHost, 				// direction
+				t->table_stream), goto err2);			// stream
 	HANDLE_ERROR(cudaEventRecord(handle->event_next, t->table_stream), goto err2);
 	
 	// return handle for user
@@ -101,7 +115,11 @@ T *db_select_next(select_handle<T, N> *handle) {
 		if(handle->host_buf_cur->nvalid == SELECT_CHUNK_SIZE) {
 			// there are more results, fetch them
 			db_dev_select_block(handle->t, handle->dev_crit, handle->dev_state, handle->dev_buf);
-			HANDLE_ERROR(cudaMemcpyAsync(handle->host_buf_next, handle->dev_buf, sizeof(*handle->host_buf_next), cudaMemcpyDeviceToHost, handle->t->table_stream), goto err0);
+			HANDLE_ERROR(cudaMemcpyAsync(handle->host_buf_next,	// destination
+						handle->dev_buf, 						// source
+						sizeof(*handle->host_buf_next), 		// size
+						cudaMemcpyDeviceToHost, 				// direction
+						handle->t->table_stream), goto err0);	// stream
 			HANDLE_ERROR(cudaEventRecord(handle->event_next, handle->t->table_stream), goto err0);
 		}
 	}

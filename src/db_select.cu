@@ -4,19 +4,46 @@
 
 #include "cuda_util.h"
 
+#define DEFAULT_CRITERIA 0
+
+template <typename T, int N>
+static __device__ order evaluate_criteria(table_index<T>* idxs, criteria<T, N>* crit, T* elem, int i) {
+	table_index<T>* idx = &idxs[crit->crit_idxs[i]];
+	cmp_op crit_op = crit->crit_ops[i];
+	order res = memcmp(elem, &crit->model, idx->key_offset, idx->key_size);
+	
+	switch(crit_op) {
+	case LT:
+		return res == ORD_LT ? ORD_EQ : ORD_GT;
+	case LE:
+		return res == ORD_LT || res == ORD_EQ ? ORD_EQ : ORD_GT;
+	case EQ:
+		return res;
+	case GE:
+		return res == ORD_EQ || res == ORD_GT ? ORD_EQ : ORD_LT;
+	case GT:
+		return res == ORD_GT ? ORD_EQ : ORD_LT;
+		//TODO support NE
+	}
+
+	// we'll never reach here
+	ASSERT(false);
+	return ORD_NA;
+}
+
 /**
  *	Evaluates a set of criteria on an element and returns true if it passes. False otherwise.
  */
 template <typename T, int N>
-static __device__ bool evaluate_criteria(table_index<T>* idxs, criteria<T, N>* crit, T* elem) {
+static __device__ bool evaluate_criterias(table_index<T>* idxs, criteria<T, N>* crit, T* elem) {
 	for(int i = 0; i < N; i++) {
-		table_index<T>* idx = &idxs[crit->crit_idxs[i]];
-		if(memcmp(&crit->model, elem, idx->key_offset, idx->key_size) != EQ) {
+		if(evaluate_criteria(idxs, crit, elem, i) != ORD_EQ) {
 			return false;
 		}
 	}
 	return true;
 }
+
 
 template <typename T, int N>
 static __global__ void dev_select_block(table_index<T>* idxs, criteria<T, N>* _crit, select_state<T>* state, result_buffer<T>* res) {
@@ -68,7 +95,7 @@ static __global__ void dev_select_block(table_index<T>* idxs, criteria<T, N>* _c
 			// at leaf node, add as many as possible
 			int max_elems = SELECT_CHUNK_SIZE - res_fill;
 			int min_idx   = node_idx[stack_idx];
-			bool is_valid = idx >= min_idx && evaluate_criteria(idxs, &crit, elem);
+			bool is_valid = idx >= min_idx && evaluate_criterias(idxs, &crit, elem);
 			int num_valid = __warp_vote(is_valid);
 			int my_idx    = __warp_exc_sum(is_valid);
 
@@ -80,7 +107,7 @@ static __global__ void dev_select_block(table_index<T>* idxs, criteria<T, N>* _c
 			if(max_elems < num_valid) {
 				// more on this level, store node_idx 
 				if(is_valid && my_idx == max_elems - 1) {
-					ASSERT(idx < WARP_SIZE() - 1);
+				ASSERT(idx < WARP_SIZE() - 1);
 					node_idx[stack_idx] = idx + 1;
 				}
 			} else {
@@ -96,13 +123,13 @@ static __global__ void dev_select_block(table_index<T>* idxs, criteria<T, N>* _c
 			ASSERT(idx >= num_elems || elem != NULL);
 
 			// compare all elements
-			order ord = memcmp(elem, &crit.model, index->key_offset, index->key_size);
+			order ord = evaluate_criteria(idxs, &crit, elem, DEFAULT_CRITERIA);
 			
 			// find first non-LT node
 			int child_idx, init_idx = node_idx[stack_idx];
 			if(init_idx == 0) {
-				// first recurse
-				child_idx = __first_lane_true_idx(ord != LT);
+				// first recurse, find first valid index or last index if no one is valid
+				child_idx = __first_lane_true_idx(ord != ORD_LT);
 			} else {
 				child_idx = init_idx;
 				if(child_idx > num_children - 1) {
@@ -110,7 +137,7 @@ static __global__ void dev_select_block(table_index<T>* idxs, criteria<T, N>* _c
 					stack_idx--;
 					continue;
 				}
-				if(__any(idx == child_idx - 1 && ord != EQ)) {
+				if(__any(idx == child_idx - 1 && ord != ORD_EQ)) {
 					// we stop recursing when the element before the child_idx
 					// is not equal
 					break;
@@ -118,7 +145,7 @@ static __global__ void dev_select_block(table_index<T>* idxs, criteria<T, N>* _c
 			}
 		
 			// check if node before was valid and if so, add it
-			if(idx == child_idx - 1 && ord == EQ && evaluate_criteria(idxs, &crit, elem)) {
+			if(idx == child_idx - 1 && ord == EQ && evaluate_criterias(idxs, &crit, elem)) {
 				res->results[res_fill] = *elem;
 				res_fill++;
 			}

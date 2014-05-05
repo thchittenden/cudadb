@@ -5,8 +5,8 @@ TSTDIR := tst
 EXECUTABLE := cudadb
 SRC_EXTS := cpp cu
 
-ASSERTIONS = true
-DEBUG = true
+ASSERTIONS = false
+DEBUG = false
 
 # C++ compiler
 CXX := g++

@@ -20,7 +20,7 @@ static __device__ void dev_btree_node_insert(btree_node<T*>* node, T* x, size_t 
 
 	// get the first lane where the key is greater than the new value or an empty lane
 	order cmp = memcmp(key, x, key_offset, key_size);
-	int insert_idx = __first_lane_true_idx(cmp == NA || cmp == GT);
+	int insert_idx = __first_lane_true_idx(cmp == ORD_NA || cmp == ORD_GT);
 	ASSERT(insert_idx < BTREE_NODE_KEYS);
 
 	// shift old elems
@@ -113,7 +113,7 @@ __device__ void dev_insert_elem(table_index<T>* index, T* elem) {
 		order cmp = memcmp(key, elem, key_offset, key_size);
 	
 		// get first key greater than our elem
-		int node_idx = __first_lane_true_idx(cmp == NA || cmp == GT);
+		int node_idx = __first_lane_true_idx(cmp == ORD_NA || cmp == ORD_GT);
 
 		// split the node if we need to
 		if(__all(key != NULL || idx >= BTREE_NODE_KEYS)) {

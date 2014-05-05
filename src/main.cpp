@@ -3,27 +3,64 @@
 #include "db_insert.h"
 #include "db_select.h"
 
+#include "CycleTimer.h"
+
 #include <iostream>
+#include <thread>
 using namespace std;
+
+#define NUM 1000
 
 int main() {
 	db_init(500*1024*1024);
 	auto t = db_table_create(&record::id, &record::time); 
 	cout << "got table: " << t << endl;
 
-	record* recs = new record[1000];
-	for(int i = 0; i < 1000; i++) {
-		recs[i].id = 10;
-		recs[i].time = 1000+i;
+	record* recs = new record[NUM];
+	for(int i = 0; i < NUM; i++) {
+		recs[i].id = i % 20;
+		recs[i].time = i;
 	}
-	db_insert_bulk(t, recs, 1000);
 
-	auto h = db_select_prepare(t, make_pair(&record::id, 10)); 
+	double pre_insert = CycleTimer::currentSeconds();
+	db_insert_bulk(t, recs, NUM);
+	double post_insert = CycleTimer::currentSeconds();
+
+	// allow insert to finish
+	//this_thread::sleep_for(chrono::seconds(2));
+
+	double pre_prepare = CycleTimer::currentSeconds();
+	auto h = db_select_prepare(t, make_tuple(&record::id, GT, -1)); 
+	double post_prepare = CycleTimer::currentSeconds();
+
+	double avg_next = 0.0f;
+	double max_next = 0.0f;
+	int max_iter = 0;
+	int cur_iter = 0;
 	record* rec;
-	while((rec = db_select_next(h)) != NULL) {
-		cout << "got record{id=" << rec->id << ", time=" << rec->time << "}" << endl;
-	}
-	
+	do {
+		
+		double pre_next = CycleTimer::currentSeconds();
+		rec = db_select_next(h);
+		double next_time = CycleTimer::currentSeconds() - pre_next;
+		if(next_time > max_next) {
+			max_next = next_time;
+			max_iter = cur_iter;
+		}
+		if(rec != NULL) {
+			cout << "got record {id = " << rec->id << ", time = " << rec->time << "}" << endl;
+		}
+		avg_next += next_time;
+		cur_iter++;
+
+	} while(rec != NULL);
+	avg_next /= NUM;
+
+	cout << "insert time: " << 1000.f * (post_insert - pre_insert) << endl;
+	cout << "prepare time: " << 1000.f * (post_prepare - pre_prepare) << endl;
+	cout << "avg select time: " << 1000.f * avg_next << endl;
+	cout << "max select time: " << 1000.f * max_next << " on iteration " << max_iter << endl;
+
 	db_select_destroy(h);
 	db_table_destroy(t);
 }

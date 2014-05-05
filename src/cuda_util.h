@@ -4,10 +4,10 @@
 #include "cuda_common.h"
 
 enum order {
-	NA,
-	LT,
-	EQ,
-	GT
+	ORD_NA,
+	ORD_LT,
+	ORD_EQ,
+	ORD_GT
 };
 
 /**
@@ -102,13 +102,13 @@ static __device__ int __warp_exc_sum(int input) {
 template <typename T>
 static __device__ order memcmp(T* _x1, T* _x2, size_t offset, size_t size) {
 	if(_x1 == NULL || _x2 == NULL)
-		return NA;
+		return ORD_NA;
 	char *x1 = (char*)_x1, *x2 = (char*)_x2;
 	for(int i = offset; i < offset + size; i++) {
-		if (x1[i] < x2[i]) return LT;
-		if (x1[i] > x2[i]) return GT;
+		if (x1[i] < x2[i]) return ORD_LT;
+		if (x1[i] > x2[i]) return ORD_GT;
 	}
-	return EQ;
+	return ORD_EQ;
 }
 
 #endif
