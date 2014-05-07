@@ -38,17 +38,15 @@ static __device__ order evaluate_compare_criteria(void* crit_str, T* elem) {
 
 template <typename T>
 static __device__ bool evaluate_criteria(char* crit_str, T* elem) {
-	__shared__ bool eval_stack[CRITERIA_MAX_DEPTH * WARP_SIZE()];
 	__shared__ int  eval_rem  [CRITERIA_MAX_DEPTH];
 	__shared__ bool eval_op   [CRITERIA_MAX_DEPTH];
 	__shared__ crit_block* crit_ptr;
 	crit_ptr = (crit_block*)crit_str; 
 
 	int eval_idx = 0;
-	int eval_stack_idx = LANE_INDEX();
 
 	// initialize first level 
-	eval_stack[eval_stack_idx] = true;
+	bool res = true;
 	eval_rem  [eval_idx] = 1;
 	eval_op   [eval_idx] = true;
 
@@ -56,17 +54,17 @@ static __device__ bool evaluate_criteria(char* crit_str, T* elem) {
 	while(eval_idx >= 0) {
 		
 		// loop until the current result is different than what the operation requires to complete
-		while(eval_rem[eval_idx] > 0 && eval_stack[eval_stack_idx] == eval_op[eval_idx]) {
+		while(eval_rem[eval_idx] > 0 && res == eval_op[eval_idx]) {
 			
 			switch(crit_ptr->tag) {
 				case OR_TAG:
 				case AND_TAG: {
 					bool def = crit_ptr->tag == AND_TAG;
 					eval_rem[eval_idx] -= 1;
-					eval_idx += 1; eval_stack_idx += WARP_SIZE();
-					eval_stack[eval_stack_idx] = def;
+					eval_idx += 1;
 					eval_rem [eval_idx] = crit_ptr->comb.size;
 					eval_op  [eval_idx] = def;
+					res = def;
 
 					//advance crit_ptr
 					crit_ptr = (crit_block*)(&crit_ptr->comb.sub_blocks);
@@ -77,7 +75,7 @@ static __device__ bool evaluate_criteria(char* crit_str, T* elem) {
 				case EQ_TAG:
 				case GE_TAG:
 				case GT_TAG: {
-					eval_stack[eval_stack_idx] = evaluate_compare_criteria(crit_ptr, elem) == ORD_EQ;
+					res = evaluate_compare_criteria(crit_ptr, elem) == ORD_EQ;
 					
 					// advance crit_ptr
 					crit_ptr = (crit_block*)(&crit_ptr->comp.val[ALIGN_UP(crit_ptr->comp.size, 8)]);
@@ -91,13 +89,9 @@ static __device__ bool evaluate_criteria(char* crit_str, T* elem) {
 		
 		// finished a level, go down and update result
 		eval_idx -= 1;
-		eval_stack_idx -= WARP_SIZE();
-		if(eval_idx >= 0) {
-			eval_stack[eval_stack_idx] = eval_stack[eval_stack_idx + WARP_SIZE()]; 
-		}
 	}
 
-	return eval_stack[LANE_INDEX()];
+	return res;
 }
 
 template <typename T>

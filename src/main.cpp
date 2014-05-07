@@ -10,10 +10,10 @@
 #include <thread>
 using namespace std;
 
-#define NUM 100000
+#define NUM 1000
 
 int main() {
-	db_init(500*1024*1024);
+	db_init(10*1024*1024);
 	auto t = db_table_create(&record::id, &record::time); 
 	cout << "got table: " << t << endl;
 
@@ -28,10 +28,10 @@ int main() {
 	double post_insert = CycleTimer::currentSeconds();
 
 	// allow insert to finish
-	this_thread::sleep_for(chrono::seconds(25));
+	this_thread::sleep_for(chrono::seconds(2));
 
 	double pre_prepare = CycleTimer::currentSeconds();
-	auto h = db_select_prepare(t, LT(&record::id, 21), LT(&record::id, 21));
+	auto h = db_select_prepare(t, EQ(&record::id, 2), EQ(&record::id, 2));
 	double post_prepare = CycleTimer::currentSeconds();
 
 	double avg_next = 0.0f;
@@ -57,7 +57,7 @@ int main() {
 		cur_iter++;
 
 	} while(rec != NULL);
-	avg_next /= NUM;
+	avg_next /= cur_iter;
 
 	cout << "insert time: " << 1000.f * (post_insert - pre_insert) << endl;
 	cout << "prepare time: " << 1000.f * (post_prepare - pre_prepare) << endl;

@@ -15,6 +15,8 @@ void db_init(size_t size) {
 
 	// favor the cache, we don't use much shared memory
 	cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
+
+	HANDLE_ERROR(cudaGetLastError(), exit(1));
 }
 
 template <typename T, typename... A>
