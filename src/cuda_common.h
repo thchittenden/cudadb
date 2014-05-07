@@ -20,6 +20,8 @@
 	#define DEBUG(x, y)
 #endif
 
+#define ALIGN_UP(x, n) ((x + n - 1) & ~(x - 1))
+
 #define SUCCESS cudaSuccess
 #define ERROR cudaErrorUnknown
 

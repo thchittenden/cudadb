@@ -9,11 +9,7 @@ struct record {
 #ifndef TABLE
 #define TABLE(x) 
 #endif 
-#ifndef CRITERIA
-#define CRITERIA(x, y)
-#endif
 
 TABLE(record);
-CRITERIA(record, 1);
 
 #endif

@@ -2,6 +2,7 @@
 #include "db_exp.h"
 #include "db_insert.h"
 #include "db_select.h"
+#include "db_criteria.h"
 
 #include "CycleTimer.h"
 
@@ -9,7 +10,7 @@
 #include <thread>
 using namespace std;
 
-#define NUM 1000
+#define NUM 100000
 
 int main() {
 	db_init(500*1024*1024);
@@ -27,10 +28,10 @@ int main() {
 	double post_insert = CycleTimer::currentSeconds();
 
 	// allow insert to finish
-	//this_thread::sleep_for(chrono::seconds(2));
+	this_thread::sleep_for(chrono::seconds(25));
 
 	double pre_prepare = CycleTimer::currentSeconds();
-	auto h = db_select_prepare(t, make_tuple(&record::id, GT, -1)); 
+	auto h = db_select_prepare(t, LT(&record::id, 21), LT(&record::id, 21));
 	double post_prepare = CycleTimer::currentSeconds();
 
 	double avg_next = 0.0f;
@@ -48,7 +49,9 @@ int main() {
 			max_iter = cur_iter;
 		}
 		if(rec != NULL) {
-			cout << "got record {id = " << rec->id << ", time = " << rec->time << "}" << endl;
+			cout << "got rec  {id = " << rec->id << ", time = " << rec->time << "}" << endl;
+		} else {
+			cout << "no rec  found" << endl;
 		}
 		avg_next += next_time;
 		cur_iter++;

@@ -97,18 +97,28 @@ static __device__ int __warp_exc_sum(int input) {
 }
 
 /**
- *	Compares _x1[offset:offset+size] with _x2[offset:offset+size]
+ *
  */
-template <typename T>
-static __device__ order memcmp(T* _x1, T* _x2, size_t offset, size_t size) {
+static __device__ order memcmp(void* _x1, void*_x2, size_t size) {
 	if(_x1 == NULL || _x2 == NULL)
 		return ORD_NA;
 	char *x1 = (char*)_x1, *x2 = (char*)_x2;
-	for(int i = offset; i < offset + size; i++) {
+	for(int i = 0; i < size; i++) {
 		if (x1[i] < x2[i]) return ORD_LT;
 		if (x1[i] > x2[i]) return ORD_GT;
 	}
 	return ORD_EQ;
+	
+}
+
+/**
+ *	Compares _x1[offset:offset+size] with _x2[offset:offset+size]
+ */
+template <typename T>
+static __device__ order objcmp(T* _x1, T* _x2, size_t offset, size_t size) {
+	char* x1 = _x1 != NULL ? (char*)_x1 + offset : NULL;
+	char* x2 = _x2 != NULL ? (char*)_x2 + offset : NULL;
+	return memcmp(x1, x2, size);
 }
 
 #endif

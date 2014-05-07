@@ -10,6 +10,8 @@
 #define GLUE(x, y) _GLUE(x, y)
 #define APPLY(expr) int GLUE(_apply, __LINE__)[] = {(expr, 0)...}; (void)GLUE(_apply,__LINE__);
 
+#define ALIGN_UP(p, x) (decltype(p))(((intptr_t)p + x-1) & ~(x-1)) 
+
 /**
  *	Returns the offset into struct T of an arbitrary member M.
  */	

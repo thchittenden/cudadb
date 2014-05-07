@@ -7,4 +7,6 @@
 #define BTREE_NODE_CHILDREN (BTREE_NODE_KEYS + 1)
 #define BTREE_MAX_DEPTH 6
 
+#define CRITERIA_MAX_DEPTH 4
+
 #endif

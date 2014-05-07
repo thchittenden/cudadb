@@ -10,17 +10,17 @@ DEBUG = false
 
 # C++ compiler
 CXX := g++
-CXXFLAGS := -std=c++11 -Wall -I $(INCDIR) -I /usr/local/cuda/include -O3
+CXXFLAGS := -std=c++11 -Wall -I $(INCDIR) -I /usr/local/cuda/include 
 LDFLAGS := -L/usr/local/cuda/lib64/ -lcudart
 
 # NVCC compiler
 NVCC := nvcc -arch=sm_20
-NVCCFLAGS := --restrict -lineinfo -I $(INCDIR) -O3
+NVCCFLAGS := --restrict -lineinfo -I $(INCDIR) 
 
 # add debug flag if necessary
 ifeq ($(DEBUG),true)
-	NVCCFLAGS := $(NVCCFLAGS) -D__DEBUG__ -g -G
-	CXXFLAGS := $(CXXFLAGS) -D__DEBUG__ -g3 -gstabs+
+	NVCCFLAGS := $(NVCCFLAGS) -D__DEBUG__ -O0 -g -G
+	CXXFLAGS := $(CXXFLAGS) -D__DEBUG__ -O0 -g3 -gstabs+
 endif
 
 ifeq ($(ASSERTIONS),true)
@@ -53,12 +53,12 @@ $(EXECUTABLE): $(OBJS)
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 		@test -d $(dir $@) || mkdir -p $(dir $@)
 		$(CXX) $< $(CXXFLAGS) -c -o $@
-		$(CXX) -MM $(CXXFLAGS) $< > $(OBJDIR)/$*.d
+		$(CXX) -MM -MT $@ $(CXXFLAGS) $< > $(OBJDIR)/$*.d
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.cu
 		@test -d $(dir $@) || mkdir -p $(dir $@)
 		$(NVCC) $< $(NVCCFLAGS) -c -o $@
-		$(NVCC) -M $(NVCCFLAGS) $< > $(OBJDIR)/$*.d
+		$(NVCC) -M -MT $@ $(NVCCFLAGS) $< > $(OBJDIR)/$*.d
 
 $(TSTDIR)/%: $(TSTDIR)/%.cpp $(OBJS)
 		$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $(OBJS) $<

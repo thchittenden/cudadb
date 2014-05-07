@@ -19,7 +19,7 @@ static __device__ void dev_btree_node_insert(btree_node<T*>* node, T* x, size_t 
 	ASSERT(__any(idx < BTREE_NODE_KEYS && key == NULL)); // assert not full
 
 	// get the first lane where the key is greater than the new value or an empty lane
-	order cmp = memcmp(key, x, key_offset, key_size);
+	order cmp = objcmp(key, x, key_offset, key_size);
 	int insert_idx = __first_lane_true_idx(cmp == ORD_NA || cmp == ORD_GT);
 	ASSERT(insert_idx < BTREE_NODE_KEYS);
 
@@ -96,7 +96,7 @@ static __device__ btree_node<T*>* dev_btree_node_split(table_index<T>* index, bt
 template <typename T>
 __device__ void dev_insert_elem(table_index<T>* index, T* elem) {
 	
-	DEBUG(0, printf("inserting %p into index %p\n", elem, index));
+	//DEBUG(0, printf("inserting %p into index %p\n", elem, index));
 
 	int idx = LANE_INDEX();
 	size_t key_offset = index->key_offset;
@@ -110,7 +110,7 @@ __device__ void dev_insert_elem(table_index<T>* index, T* elem) {
 		ASSERT(cur != NULL);
 		
 		T* key = cur->elems[idx];
-		order cmp = memcmp(key, elem, key_offset, key_size);
+		order cmp = objcmp(key, elem, key_offset, key_size);
 	
 		// get first key greater than our elem
 		int node_idx = __first_lane_true_idx(cmp == ORD_NA || cmp == ORD_GT);

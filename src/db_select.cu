@@ -4,63 +4,132 @@
 
 #include "cuda_util.h"
 
-#define DEFAULT_CRITERIA 0
-
-template <typename T, int N>
-static __device__ order evaluate_criteria(table_index<T>* idxs, criteria<T, N>* crit, T* elem, int i) {
-	table_index<T>* idx = &idxs[crit->crit_idxs[i]];
-	cmp_op crit_op = crit->crit_ops[i];
-	order res = memcmp(elem, &crit->model, idx->key_offset, idx->key_size);
-	
-	switch(crit_op) {
-	case LT:
-		return res == ORD_LT ? ORD_EQ : ORD_GT;
-	case LE:
-		return res == ORD_LT || res == ORD_EQ ? ORD_EQ : ORD_GT;
-	case EQ:
-		return res;
-	case GE:
-		return res == ORD_EQ || res == ORD_GT ? ORD_EQ : ORD_LT;
-	case GT:
-		return res == ORD_GT ? ORD_EQ : ORD_LT;
-		//TODO support NE
+template <typename T>
+static __device__ order evaluate_compare_criteria(void* crit_str, T* elem) {
+	ASSERT(crit_str != NULL);
+	if(elem == NULL) {
+		return ORD_NA;
 	}
 
-	// we'll never reach here
-	ASSERT(false);
+	crit_block* block = (crit_block*)crit_str;
+	crit_tag op       = block->tag;
+	size_t key_offset = block->comp.offset;
+	size_t key_size   = block->comp.size;
+	order res = memcmp((char *)elem + key_offset, (char *)&block->comp.val, key_size);
+	
+	switch(op) {
+	case LT_TAG:
+		return res == ORD_LT ? ORD_EQ : ORD_GT;
+	case LE_TAG:
+		return res == ORD_LT || res == ORD_EQ ? ORD_EQ : ORD_GT;
+	case EQ_TAG:
+		return res;
+	case GE_TAG:
+		return res == ORD_GT || res == ORD_EQ ? ORD_EQ : ORD_LT;
+	case GT_TAG:
+		return res == ORD_GT ? ORD_EQ : ORD_LT;
+	default:
+		ASSERT(false); // bad crit tag
+	}
+
+	// should never reach here
 	return ORD_NA;
 }
 
-/**
- *	Evaluates a set of criteria on an element and returns true if it passes. False otherwise.
- */
-template <typename T, int N>
-static __device__ bool evaluate_criterias(table_index<T>* idxs, criteria<T, N>* crit, T* elem) {
-	for(int i = 0; i < N; i++) {
-		if(evaluate_criteria(idxs, crit, elem, i) != ORD_EQ) {
-			return false;
+template <typename T>
+static __device__ bool evaluate_criteria(char* crit_str, T* elem) {
+	__shared__ bool eval_stack[CRITERIA_MAX_DEPTH * WARP_SIZE()];
+	__shared__ int  eval_rem  [CRITERIA_MAX_DEPTH];
+	__shared__ bool eval_op   [CRITERIA_MAX_DEPTH];
+	__shared__ crit_block* crit_ptr;
+	crit_ptr = (crit_block*)crit_str; 
+
+	int eval_idx = 0;
+	int eval_stack_idx = LANE_INDEX();
+
+	// initialize first level 
+	eval_stack[eval_stack_idx] = true;
+	eval_rem  [eval_idx] = 1;
+	eval_op   [eval_idx] = true;
+
+	// TODO i think we can replace eval_stack with a single boolean
+	while(eval_idx >= 0) {
+		
+		// loop until the current result is different than what the operation requires to complete
+		while(eval_rem[eval_idx] > 0 && eval_stack[eval_stack_idx] == eval_op[eval_idx]) {
+			
+			switch(crit_ptr->tag) {
+				case OR_TAG:
+				case AND_TAG: {
+					bool def = crit_ptr->tag == AND_TAG;
+					eval_rem[eval_idx] -= 1;
+					eval_idx += 1; eval_stack_idx += WARP_SIZE();
+					eval_stack[eval_stack_idx] = def;
+					eval_rem [eval_idx] = crit_ptr->comb.size;
+					eval_op  [eval_idx] = def;
+
+					//advance crit_ptr
+					crit_ptr = (crit_block*)(&crit_ptr->comb.sub_blocks);
+				} continue;
+				
+				case LT_TAG:
+				case LE_TAG:
+				case EQ_TAG:
+				case GE_TAG:
+				case GT_TAG: {
+					eval_stack[eval_stack_idx] = evaluate_compare_criteria(crit_ptr, elem) == ORD_EQ;
+					
+					// advance crit_ptr
+					crit_ptr = (crit_block*)(&crit_ptr->comp.val[ALIGN_UP(crit_ptr->comp.size, 8)]);
+				} break;
+			}
+
+			ASSERT(eval_idx < CRITERIA_MAX_DEPTH);
+			eval_rem[eval_idx] -= 1;
+		}
+		
+		
+		// finished a level, go down and update result
+		eval_idx -= 1;
+		eval_stack_idx -= WARP_SIZE();
+		if(eval_idx >= 0) {
+			eval_stack[eval_stack_idx] = eval_stack[eval_stack_idx + WARP_SIZE()]; 
 		}
 	}
-	return true;
+
+	return eval_stack[LANE_INDEX()];
 }
 
-
-template <typename T, int N>
-static __global__ void dev_select_block(table_index<T>* idxs, criteria<T, N>* _crit, select_state<T>* state, result_buffer<T>* res) {
+template <typename T>
+static __global__ void dev_select_block(
+							table_index<T>* index, 
+							int index_crit_str_len,
+							char* _index_crit_str, 
+							int crit_str_len,
+							char* _crit_str, 
+							select_state<T>* state, 
+							result_buffer<T>* res) {
 	int idx = LANE_INDEX();
 
-	// load criteria into shared memory and pick an arbitrary tree
-	__shared__ criteria<T, N> crit;
-	__shared__ table_index<T>* index;
-	crit = *_crit;
-	index = &idxs[crit.crit_idxs[0]];
+	// declare dynamic shared memory
+	extern __shared__ char crit_cache[];
+	char* index_crit_str = &crit_cache[0];
+	char* crit_str       = &crit_cache[index_crit_str_len];
+
+	// load criteria into shared memory
+	for(int i = idx; i < index_crit_str_len; i += WARP_SIZE()) {
+		index_crit_str[i] = _index_crit_str[i];
+	} 
+	for(int i = idx; i < crit_str_len; i += WARP_SIZE()) {
+		crit_str[i] = _crit_str[i];
+	}
 
 	// load state
 	__shared__ btree_node<T*>* node_stack[BTREE_MAX_DEPTH];
 	__shared__ int node_idx[BTREE_MAX_DEPTH];
 	int stack_idx = state->stack_idx;
 	if(state->node_stack[0] == NULL) {
-		// new select, initialize state
+		// new select, TODO determine best index out of criteria
 		node_stack[0] = index->tree.root;
 		node_idx[0] = 0;
 	} else {
@@ -95,7 +164,7 @@ static __global__ void dev_select_block(table_index<T>* idxs, criteria<T, N>* _c
 			// at leaf node, add as many as possible
 			int max_elems = SELECT_CHUNK_SIZE - res_fill;
 			int min_idx   = node_idx[stack_idx];
-			bool is_valid = idx >= min_idx && evaluate_criterias(idxs, &crit, elem);
+			bool is_valid = idx >= min_idx && evaluate_criteria(crit_str, elem);
 			int num_valid = __warp_vote(is_valid);
 			int my_idx    = __warp_exc_sum(is_valid);
 
@@ -123,7 +192,7 @@ static __global__ void dev_select_block(table_index<T>* idxs, criteria<T, N>* _c
 			ASSERT(idx >= num_elems || elem != NULL);
 
 			// compare all elements
-			order ord = evaluate_criteria(idxs, &crit, elem, DEFAULT_CRITERIA);
+			order ord = evaluate_compare_criteria(index_crit_str, elem);
 			
 			// find first non-LT node
 			int child_idx, init_idx = node_idx[stack_idx];
@@ -145,7 +214,7 @@ static __global__ void dev_select_block(table_index<T>* idxs, criteria<T, N>* _c
 			}
 		
 			// check if node before was valid and if so, add it
-			if(idx == child_idx - 1 && ord == EQ && evaluate_criterias(idxs, &crit, elem)) {
+			if(idx == child_idx - 1 && ord == ORD_EQ && evaluate_criteria(crit_str, elem)) {
 				res->results[res_fill] = *elem;
 				res_fill++;
 			}
@@ -169,16 +238,27 @@ static __global__ void dev_select_block(table_index<T>* idxs, criteria<T, N>* _c
 	}
 }
 
-template <typename T, int N>
-void db_dev_select_block(table<T>* t, criteria<T, N>* crit, select_state<T>* state, result_buffer<T>* res) {
+template <typename T>
+void db_dev_select_block(select_handle<T>* handle) {
+	
+	// allocate dynamic shared memory for criteria 
+	int dmem = handle->dev_idx_crit_str_len + handle->dev_crit_str_len;
 
-	dev_select_block<T, N><<<1, 32, 0, t->table_stream>>>(t->dev_indexes, crit, state, res);
+	// launch select block
+	dev_select_block<T><<<1, 32, dmem, handle->t->table_stream>>>(
+		handle->dev_idx, 
+		handle->dev_idx_crit_str_len, 
+		handle->dev_idx_crit_str, 
+		handle->dev_crit_str_len, 
+		handle->dev_crit_str,
+		handle->dev_state,
+		handle->dev_buf);
 
 }
 
 // explicit instantiation until nvcc supports variadic templates
-#define CRITERIA(T, N) \
-	template void db_dev_select_block<T, N>(table<T>*, criteria<T, N>*, select_state<T>*, result_buffer<T>*);
+#define TABLE(T) \
+	template void db_dev_select_block<T>(select_handle<T>*);
 #include "db_exp.h"
 #undef CRITERIA
 
